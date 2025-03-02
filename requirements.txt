@@ -1,0 +1,7 @@
+requests
+boto3
+datetime
+google-api-python-client
+oauth2client
+botocore
+pandas
