@@ -276,7 +276,7 @@ for file in files:
                     # print('fila: ', fila)
                     cuit_o_cuil = ''
                     if fila != []:      
-                        print('fila: ', fila)          
+                        # print('fila: ', fila)          
                         if 'PERÍODO\nGASTO' in fila or 'UNIDAD\nFUNCIONAL' in fila:
                             # reemplazamos tanto PERIODO\nGASTO por PERIOD GASTO como tambien GASTO\nPARTICULAR, IMPORTE\nTOTAL 
                             # y SALDO\nIMPAGO por GASTO PARTICULAR, IMPORTE TOTAL y SALDO IMPAGO
@@ -313,21 +313,46 @@ for file in files:
                         detalle_sin_liq = ''
                         detalles = ''
 
+                        print('detalle_2: ', detalle_2)
+
                         if '[Fc.' in detalle_2:       
                             pattern_factura = r"\[Fc\. (A|B|C) \d{4}-\d{8}\]"
-                            pattern_tipo_factura = r".\A|B|C"
+                            pattern_tipo_factura = r"\[Fc\. ([A-C])"
                             pattern_numero_factura = r"\d{4}-\d{8}"
                             
-                            factura = re.search(pattern_factura, detalle_2).group(0)
-                            numero_factura = re.search(pattern_numero_factura, detalle_2).group(0)
-                            tipo_factura = re.search(pattern_tipo_factura, detalle_2).group(0)
+                            match_factura = re.search(pattern_factura, detalle_2)
+                            match_numero_factura = re.search(pattern_numero_factura, detalle_2)
+                            match_tipo_factura = re.search(pattern_tipo_factura, detalle_2)
 
-                            if detalle_2.find(factura) == 0:
-                                detalle_sin_factura = detalle_2[detalle_2.find(factura) + len(factura) +1:].strip()
+                            if match_factura:
+                                factura = match_factura.group(0)
+                                numero_factura = match_numero_factura.group(0)
+                                tipo_factura = match_tipo_factura.group(1)
+
+                                if detalle_2.find(factura) == 0:
+                                    detalle_sin_factura = detalle_2[detalle_2.find(factura) + len(factura) +1:].strip()
+                                else:
+                                    a = detalle_2[:detalle_2.find(factura)-1].strip()
+                                    b = detalle_2[detalle_2.find(factura) + len(factura) + 1:].strip()
+                                    detalle_sin_factura = a + ' ' + b
                             else:
-                                a = detalle_2[:detalle_2.find(factura)-1].strip()
-                                b = detalle_2[detalle_2.find(factura) + len(factura) + 1:].strip()
-                                detalle_sin_factura = a + ' ' + b
+                                pattern_factura_con_cuota = r"\[Fc\. (A|B|C) \d{4}-\d{8}\]"
+
+                                match_factura_con_cuota = re.search(pattern_factura_con_cuota, detalle_2)
+                                numero_factura = match_numero_factura.group(0)
+                                tipo_factura = match_tipo_factura.group(0)
+
+                                if match_factura_con_cuota:
+                                    factura_con_cuota = match_factura_con_cuota.group(0)
+
+                                    if detalle_2.find(factura_con_cuota) == 0:
+                                        detalle_sin_factura = detalle_2[detalle_2.find(factura_con_cuota) + len(factura_con_cuota) +1:].strip()
+                                    else:
+                                        a = detalle_2[:detalle_2.find(factura_con_cuota)-1].strip()
+                                        b = detalle_2[detalle_2.find(factura_con_cuota) + len(factura_con_cuota) + 1:].strip()
+                                        detalle_sin_factura = a + ' ' + b
+
+                                    print('detalle_sin_factura: ', detalle_sin_factura)
 
                         if '[Pago ' in detalle_sin_factura or (detalle_sin_factura == '' and '[Pago ' in detalle_2) or '[Pago ' in fila_sin_newline:  
                             
@@ -555,7 +580,7 @@ for file in files:
                         
                         if detalles != '' and '[LSP ' in detalles: # Liquidacion servicio publico    
                             pattern_liq = r"\[LSP\ (A|B|C) \d{4}-\d{8}\]"
-                            pattern_tipo_liq = r".\A|B|C"
+                            pattern_tipo_liq = r"\A|B|C"
                             pattern_numero_liq = r"\d{4}-\d{8}"
                             
                             liquidacion = re.search(pattern_liq, detalles).group(0)
@@ -824,7 +849,8 @@ for file in files:
                                         if gasto_vivienda is not None:
                                             gasto_vivienda = gasto_vivienda.strip()
                                         if detalles != '' or detalles != []:
-                                            detalles = detalles.strip()
+                                            pass
+                                            # detalles = detalles.strip()
 
                                         lista_data_gastos, gasto_comun, gasto_vivienda, proveedor, numero_cuit, numero_cuil, saldo_impago, periodo_gasto, cuenta, comprobante, uf, gasto_particular, detalles, tipo_factura, numero_factura, fecha_de_pago_factura, orden_de_pago_factura = cargar_datos_df(gasto_comun, gasto_vivienda, proveedor, numero_cuit, numero_cuil, saldo_impago, periodo_gasto, cuenta, comprobante, uf, gasto_particular, detalles, tipo_factura, numero_factura, fecha_de_pago_factura, orden_de_pago_factura)
                         else:
