@@ -9,6 +9,9 @@ from enum import Enum
 from typing import Optional
 from uuid import UUID, uuid4
 
+AUTO_PUBLISH_CONFIDENCE = Decimal("0.90")
+EXPENSE_RECONCILIATION_TOLERANCE = Decimal("1.00")
+
 
 class ExpenseKind(str, Enum):
     RECURRING = "recurring"
@@ -88,4 +91,90 @@ class MonthlyStatement:
             return None
         return (self.common_amount or Decimal("0")) + (
             self.housing_amount or Decimal("0")
+        )
+
+
+@dataclass(frozen=True)
+class UnitSettlement:
+    """Amounts billed to one unit, kept separate from building expenses."""
+
+    unit: str
+    amount_due: Optional[Decimal]
+    current_period_charges: Optional[Decimal] = None
+    extraordinary_charges: Optional[Decimal] = None
+    particular_charges: Optional[Decimal] = None
+    arrears: Optional[Decimal] = None
+    discounts: Optional[Decimal] = None
+
+    def __post_init__(self) -> None:
+        if not self.unit.strip():
+            raise ValueError("unit cannot be empty")
+        for amount in (
+            self.amount_due,
+            self.current_period_charges,
+            self.extraordinary_charges,
+            self.particular_charges,
+            self.arrears,
+            self.discounts,
+        ):
+            if amount is not None and not amount.is_finite():
+                raise ValueError("unit settlement amounts must be finite")
+
+
+@dataclass(frozen=True)
+class BuildingStatement:
+    """One building's monthly expense detail and per-unit amounts."""
+
+    period: Period
+    source_name: str
+    source_id: str
+    expense_lines: tuple[ExpenseLine, ...] = field(default_factory=tuple)
+    unit_settlements: tuple[UnitSettlement, ...] = field(default_factory=tuple)
+    reported_expense_total: Optional[Decimal] = None
+    extraction_warnings: tuple[str, ...] = field(default_factory=tuple)
+    extraction_confidence: Optional[Decimal] = None
+    id: UUID = field(default_factory=uuid4)
+
+    def __post_init__(self) -> None:
+        if not self.source_name.strip() or not self.source_id.strip():
+            raise ValueError("source name and source id are required for traceability")
+        if self.extraction_confidence is not None and not (
+            Decimal("0") <= self.extraction_confidence <= Decimal("1")
+        ):
+            raise ValueError("extraction confidence must be between 0 and 1")
+        if self.reported_expense_total is not None and not self.reported_expense_total.is_finite():
+            raise ValueError("reported expense total must be finite")
+        unit_keys = [settlement.unit.strip().casefold() for settlement in self.unit_settlements]
+        if len(unit_keys) != len(set(unit_keys)):
+            raise ValueError("unit settlements must not contain duplicate units")
+
+    @property
+    def calculated_expense_total(self) -> Optional[Decimal]:
+        if not self.expense_lines:
+            return None
+        return sum((line.amount for line in self.expense_lines), Decimal("0"))
+
+    @property
+    def expense_total_matches(self) -> Optional[bool]:
+        calculated = self.calculated_expense_total
+        if calculated is None or self.reported_expense_total is None:
+            return None
+        return (
+            abs(calculated - self.reported_expense_total)
+            <= EXPENSE_RECONCILIATION_TOLERANCE
+        )
+
+    @property
+    def ready_for_auto_publication(self) -> bool:
+        return bool(
+            self.extraction_confidence is not None
+            and self.extraction_confidence >= AUTO_PUBLISH_CONFIDENCE
+            and not self.extraction_warnings
+            and self.expense_lines
+            and self.unit_settlements
+            and self.expense_total_matches is True
+            and all(
+                settlement.amount_due is not None
+                for settlement in self.unit_settlements
+            )
         )

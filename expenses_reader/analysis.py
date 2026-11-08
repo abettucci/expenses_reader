@@ -8,7 +8,14 @@ import re
 import unicodedata
 from typing import Optional
 
-from .models import ExpenseKind, ExpenseLine, MonthlyStatement
+from .models import (
+    BuildingStatement,
+    AUTO_PUBLISH_CONFIDENCE,
+    ExpenseKind,
+    ExpenseLine,
+    MonthlyStatement,
+    UnitSettlement,
+)
 
 
 @dataclass(frozen=True)
@@ -34,6 +41,53 @@ class StatementComparison:
     unmatched_previous: tuple[str, ...]
     unmatched_current: tuple[str, ...]
     needs_review: bool
+
+    @property
+    def largest_increases(self) -> tuple[Change, ...]:
+        return tuple(
+            sorted(
+                (change for change in self.line_changes if change.difference > 0),
+                key=lambda change: change.difference,
+                reverse=True,
+            )
+        )
+
+
+@dataclass(frozen=True)
+class UnitSettlementChange:
+    unit: str
+    previous_amount_due: Decimal
+    current_amount_due: Decimal
+    difference: Decimal
+    percentage: Optional[Decimal]
+    previous_arrears: Optional[Decimal]
+    current_arrears: Optional[Decimal]
+
+
+@dataclass(frozen=True)
+class BuildingComparison:
+    previous_period: str
+    current_period: str
+    previous_source: str
+    current_source: str
+    total_change: Optional[Change]
+    line_changes: tuple[Change, ...]
+    unit_changes: tuple[UnitSettlementChange, ...]
+    unmatched_previous_lines: tuple[str, ...]
+    unmatched_current_lines: tuple[str, ...]
+    unmatched_previous_units: tuple[str, ...]
+    unmatched_current_units: tuple[str, ...]
+    needs_review: bool
+
+    @property
+    def largest_increases(self) -> tuple[Change, ...]:
+        return tuple(
+            sorted(
+                (change for change in self.line_changes if change.difference > 0),
+                key=lambda change: change.difference,
+                reverse=True,
+            )
+        )
 
 
 def _key(value: str) -> str:
@@ -153,5 +207,131 @@ def compare_statements(
         line_changes=changes,
         unmatched_previous=unmatched_previous,
         unmatched_current=unmatched_current,
+        needs_review=needs_review,
+    )
+
+
+def _settlement_map(
+    settlements: tuple[UnitSettlement, ...]
+) -> dict[str, UnitSettlement]:
+    return {_key(settlement.unit): settlement for settlement in settlements}
+
+
+def _has_duplicate_source_rows(lines: tuple[ExpenseLine, ...]) -> bool:
+    row_ids = [line.source_row for line in lines if line.source_row]
+    return len(row_ids) != len(set(row_ids))
+
+
+def compare_building_statements(
+    previous: BuildingStatement,
+    current: BuildingStatement,
+) -> BuildingComparison:
+    """Compare building expenses and unit totals between consecutive months."""
+    if current.period.previous() != previous.period:
+        raise ValueError("statements must be from consecutive periods")
+
+    previous_lines = _line_map(previous.expense_lines)
+    current_lines = _line_map(current.expense_lines)
+    common_lines = previous_lines.keys() & current_lines.keys()
+    line_changes = tuple(
+        _change(
+            current_lines[key].category or current_lines[key].description,
+            previous_lines[key].amount,
+            current_lines[key].amount,
+            current_lines[key].kind,
+            previous.source_id,
+            current.source_id,
+        )
+        for key in sorted(common_lines)
+    )
+    unmatched_previous_lines = tuple(
+        previous_lines[key].description
+        for key in sorted(previous_lines.keys() - current_lines.keys())
+    )
+    unmatched_current_lines = tuple(
+        current_lines[key].description
+        for key in sorted(current_lines.keys() - previous_lines.keys())
+    )
+
+    previous_total = previous.calculated_expense_total
+    current_total = current.calculated_expense_total
+    total_change = None
+    if previous_total is not None and current_total is not None:
+        total_change = _change(
+            "Gasto total del edificio",
+            previous_total,
+            current_total,
+            ExpenseKind.UNKNOWN,
+            previous.source_id,
+            current.source_id,
+        )
+
+    previous_units = _settlement_map(previous.unit_settlements)
+    current_units = _settlement_map(current.unit_settlements)
+    common_units = previous_units.keys() & current_units.keys()
+    unit_changes = tuple(
+        UnitSettlementChange(
+            unit=current_units[key].unit,
+            previous_amount_due=previous_units[key].amount_due,
+            current_amount_due=current_units[key].amount_due,
+            difference=current_units[key].amount_due - previous_units[key].amount_due,
+            percentage=_percent(
+                previous_units[key].amount_due,
+                current_units[key].amount_due,
+            ),
+            previous_arrears=previous_units[key].arrears,
+            current_arrears=current_units[key].arrears,
+        )
+        for key in sorted(common_units)
+        if previous_units[key].amount_due is not None
+        and current_units[key].amount_due is not None
+    )
+    unmatched_previous_units = tuple(
+        previous_units[key].unit
+        for key in sorted(previous_units.keys() - current_units.keys())
+    )
+    unmatched_current_units = tuple(
+        current_units[key].unit
+        for key in sorted(current_units.keys() - previous_units.keys())
+    )
+
+    duplicate_source_rows = any(
+        _has_duplicate_source_rows(statement.expense_lines)
+        for statement in (previous, current)
+    )
+    unit_amounts_missing = any(
+        settlement.amount_due is None
+        for statement in (previous, current)
+        for settlement in statement.unit_settlements
+    )
+    needs_review = bool(
+        previous.extraction_warnings
+        or current.extraction_warnings
+        or previous.extraction_confidence is None
+        or current.extraction_confidence is None
+        or previous.extraction_confidence < AUTO_PUBLISH_CONFIDENCE
+        or current.extraction_confidence < AUTO_PUBLISH_CONFIDENCE
+        or total_change is None
+        or previous.expense_total_matches is not True
+        or current.expense_total_matches is not True
+        or unmatched_previous_lines
+        or unmatched_current_lines
+        or unmatched_previous_units
+        or unmatched_current_units
+        or duplicate_source_rows
+        or unit_amounts_missing
+    )
+    return BuildingComparison(
+        previous_period=str(previous.period),
+        current_period=str(current.period),
+        previous_source=previous.source_id,
+        current_source=current.source_id,
+        total_change=total_change,
+        line_changes=line_changes,
+        unit_changes=unit_changes,
+        unmatched_previous_lines=unmatched_previous_lines,
+        unmatched_current_lines=unmatched_current_lines,
+        unmatched_previous_units=unmatched_previous_units,
+        unmatched_current_units=unmatched_current_units,
         needs_review=needs_review,
     )

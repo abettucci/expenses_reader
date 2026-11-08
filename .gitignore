@@ -1,2 +1,6 @@
 __pycache__/
 *.py[cod]
+
+# Vercel static frontend build output
+frontend/dist/
+frontend/node_modules/
