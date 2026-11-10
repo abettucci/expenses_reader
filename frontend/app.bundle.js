@@ -26444,11 +26444,14 @@ function getSpreadsheetParts(buffer) {
   const relationshipId = firstSheet?.getAttribute("r:id") || firstSheet?.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id");
   const relationship = [...relationshipsDocument.getElementsByTagNameNS("*", "Relationship")].find((item) => item.getAttribute("Id") === relationshipId && item.getAttribute("TargetMode") !== "External");
   const target = relationship?.getAttribute("Target") || "";
-  if (!target || target.startsWith("/") || target.includes("\\") || target.split("/").includes("..") || /^[a-z]+:/i.test(target)) {
+  if (!target || target.includes("\\") || target.split("/").includes("..") || /^[a-z]+:/i.test(target)) {
     throw new ImportError("No pude reconocer la primera hoja del Excel.");
   }
-  const sheetPath = target.startsWith("xl/") ? target : `xl/${target}`;
-  if (!sheetPath.startsWith("xl/worksheets/") || !hasFile(sheetPath)) throw new ImportError("La primera hoja del Excel no est\xE1 disponible.");
+  const relativeTarget = target.startsWith("/") ? target.slice(1) : target;
+  const sheetPath = relativeTarget.startsWith("xl/") ? relativeTarget : `xl/${relativeTarget}`;
+  if (!/^xl\/worksheets\/[A-Za-z0-9_.-]+\.xml$/.test(sheetPath) || !hasFile(sheetPath)) {
+    throw new ImportError("La primera hoja del Excel no est\xE1 disponible.");
+  }
   const sheetDocument = parseXml(files[sheetPath], sheetPath);
   const sharedStrings = hasFile("xl/sharedStrings.xml") ? [...parseXml(files["xl/sharedStrings.xml"], "xl/sharedStrings.xml").getElementsByTagNameNS("*", "si")].map((item) => [...item.getElementsByTagNameNS("*", "t")].map((part) => part.textContent || "").join("")) : [];
   return { sheetDocument, sharedStrings };
