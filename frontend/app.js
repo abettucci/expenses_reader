@@ -1,3 +1,5 @@
+import { readExpenseFile } from "./importer.js";
+
 const periods = {
   "2026-10": {
     name: "Octubre 2026",
@@ -88,6 +90,11 @@ const statements = [
   { period: "Agosto 2026", file: "Liquidación_agosto_2026.pdf", total: 10294000, change: 2.4, status: "Analizada", statusTone: "ok", kind: "PDF" },
 ];
 
+const importedStatements = [];
+const importedPeriods = new Map();
+let pendingImport = null;
+let hasImportedData = false;
+
 const categoryTones = Object.freeze({
   sage: "#6e9678",
   terracotta: "#d48a69",
@@ -119,12 +126,21 @@ function signedMoney(value) {
   return `${sign}${money.format(Math.abs(value))}`;
 }
 
-function renderChart(periodKey, history) {
+function renderChart(periodKey, period) {
   const host = document.getElementById("chart-columns");
   if (!host) return;
-  const labels = ["MAY", "JUN", "JUL", "AGO", "SEP", "OCT"];
-  const activeIndex = periodKey === "2026-08" ? 3 : periodKey === "2026-09" ? 4 : 5;
-  const max = Math.max(...history) * 1.08;
+  const history = period.history;
+  const labels = period.historyLabels || ["MAY", "JUN", "JUL", "AGO", "SEP", "OCT"];
+  const activeIndex = period.historyKeys?.indexOf(periodKey)
+    ?? (periodKey === "2026-08" ? 3 : periodKey === "2026-09" ? 4 : 5);
+  const max = Math.max(...history, 1) * 1.08;
+  const yLabels = document.querySelectorAll(".chart-y-labels span");
+  yLabels.forEach((label, index) => {
+    const value = max * (1 - index / Math.max(1, yLabels.length - 1));
+    label.textContent = value >= 1_000_000
+      ? `$ ${(value / 1_000_000).toLocaleString("es-AR", { maximumFractionDigits: 1 })} M`
+      : money.format(value);
+  });
   const columns = history.map((amount, index) => {
     const column = document.createElement("div");
     column.className = `chart-column${index === activeIndex ? " selected" : ""}`;
@@ -134,8 +150,8 @@ function renderChart(periodKey, history) {
     bar.setAttribute("aria-hidden", "true");
     const month = document.createElement("span");
     month.className = "chart-month";
-    month.textContent = labels[index];
-    column.setAttribute("aria-label", `${labels[index]}: ${money.format(amount)}`);
+    month.textContent = labels[index] || "—";
+    column.setAttribute("aria-label", `${labels[index] || "Período"}: ${money.format(amount)}`);
     column.append(bar, month);
     return column;
   });
@@ -163,7 +179,7 @@ function renderCategories(categories, total) {
     track.setAttribute("aria-hidden", "true");
     const fill = document.createElement("div");
     fill.className = "progress-fill";
-    fill.style.width = `${Math.min(100, (category.amount / total) * 100)}%`;
+    fill.style.width = `${Math.min(100, (Math.abs(category.amount) / Math.max(Math.abs(total), 1)) * 100)}%`;
     fill.style.backgroundColor = categoryTones[category.tone] || categoryTones.default;
     track.append(fill);
 
@@ -185,7 +201,7 @@ function renderCategories(categories, total) {
 function renderIncreases(increases) {
   const host = document.getElementById("increase-list");
   if (!host) return;
-  const rows = increases.map((item, index) => {
+  const rows = increases.length ? increases.map((item, index) => {
     const row = document.createElement("li");
     row.className = "increase-item";
     const rank = document.createElement("span");
@@ -208,14 +224,41 @@ function renderIncreases(increases) {
     value.append(rate);
     row.append(rank, title, value);
     return row;
-  });
+  }) : (() => {
+    const row = document.createElement("li");
+    row.className = "increase-empty";
+    row.textContent = "Cargá también el período anterior para detectar aumentos.";
+    return [row];
+  })();
   host.replaceChildren(...rows);
 }
 
 function renderStatements() {
   const host = document.getElementById("statement-rows");
   if (!host) return;
-  const rows = statements.map((statement) => {
+  const allStatements = hasImportedData ? [...importedStatements].sort((left, right) => right.periodKey.localeCompare(left.periodKey)).map((statement) => ({
+    period: importedPeriods.get(statement.periodKey)?.name || statement.periodKey,
+    periodKey: statement.periodKey,
+    file: statement.file,
+    total: importedPeriods.get(statement.periodKey)?.total ?? 0,
+    change: importedPeriods.get(statement.periodKey)?.change ?? 0,
+    status: "Importada en esta sesión",
+    statusTone: "review",
+    kind: statement.kind,
+  })) : [
+    ...statements,
+    ...importedStatements.map((statement) => ({
+      period: importedPeriods.get(statement.periodKey)?.name || statement.periodKey,
+      periodKey: statement.periodKey,
+      file: statement.file,
+      total: importedPeriods.get(statement.periodKey)?.total ?? 0,
+      change: importedPeriods.get(statement.periodKey)?.change ?? 0,
+      status: "Importada en este navegador",
+      statusTone: "review",
+      kind: statement.kind,
+    })),
+  ].sort((left, right) => (right.periodKey || "").localeCompare(left.periodKey || ""));
+  const rows = allStatements.map((statement) => {
     const row = document.createElement("tr");
     const periodCell = document.createElement("td");
     periodCell.className = "period-cell";
@@ -238,7 +281,11 @@ function renderStatements() {
     totalCell.textContent = money.format(statement.total);
     const changeCell = document.createElement("td");
     changeCell.className = "table-change";
-    changeCell.textContent = `↑ ${percent.format(statement.change)}%`;
+    const importedPeriod = statement.periodKey ? importedPeriods.get(statement.periodKey) : null;
+    changeCell.textContent = importedPeriod?.hasComparison === false
+      ? "Sin comparación"
+      : `${statement.change > 0 ? "↑" : statement.change < 0 ? "↓" : "–"} ${percent.format(Math.abs(statement.change))}%`;
+    if (statement.change < 0) changeCell.classList.add("down");
     const statusCell = document.createElement("td");
     const status = document.createElement("span");
     status.className = `status-chip ${statementTones[statement.statusTone] || statementTones.ok}`;
@@ -250,7 +297,9 @@ function renderStatements() {
     action.type = "button";
     action.textContent = "···";
     action.setAttribute("aria-label", `Opciones para ${statement.period}`);
-    action.addEventListener("click", () => showToast("El archivo original todavía no está conectado."));
+    action.addEventListener("click", () => showToast(statement.periodKey
+      ? "El archivo se procesa en memoria y no se conserva después de cerrar la página."
+      : "Este documento pertenece a los datos de muestra."));
     actionCell.append(action);
     row.append(periodCell, fileCell, totalCell, changeCell, statusCell, actionCell);
     return row;
@@ -259,31 +308,121 @@ function renderStatements() {
 }
 
 function renderPeriod(periodKey) {
-  const period = Object.prototype.hasOwnProperty.call(periods, periodKey)
+  const period = importedPeriods.get(periodKey) || (Object.prototype.hasOwnProperty.call(periods, periodKey)
     ? periods[periodKey]
-    : periods["2026-10"];
+    : periods["2026-10"]);
   const deltaSign = period.delta >= 0 ? "+" : "−";
   const up = period.change >= 0;
+  const hasComparison = period.hasComparison !== false;
   setText("building-total", money.format(period.total));
-  setText("building-change", `${up ? "↑" : "↓"} ${percent.format(Math.abs(period.change))}%`);
-  setText("building-delta", `${deltaSign}${money.format(Math.abs(period.delta))}`);
-  setText("unit-total", money.format(period.unitTotal));
-  setText("unit-total-large", money.format(period.unitTotal));
-  setText("unit-total-row", money.format(period.unitTotal));
-  setText("unit-common", money.format(period.common));
-  setText("unit-particular", money.format(period.particular));
-  setText("unit-due", period.due);
-  setText("unit-due-date", period.dueShort);
-  setText("unit-change", `${period.unitChange >= 0 ? "↑" : "↓"} ${percent.format(Math.abs(period.unitChange))}%`);
+  setText("building-change", hasComparison ? `${up ? "↑" : "↓"} ${percent.format(Math.abs(period.change))}%` : "Sin comparación");
+  setText("building-delta", hasComparison ? `${deltaSign}${money.format(Math.abs(period.delta))}` : "—");
+  const hasUnitData = Number.isFinite(period.unitTotal) && period.unitTotal > 0;
+  setText("unit-card-label", hasUnitData ? "MI UNIDAD · 04 B" : "DESGLOSE POR UNIDAD");
+  setText("unit-section-label", hasUnitData ? "TU LIQUIDACIÓN" : "DATOS DE UNIDAD");
+  setText("unit-name", hasUnitData ? "Unidad 04 · B" : "No detectados en el archivo");
+  setText("unit-status", hasUnitData ? "Al día" : "Sin dato");
+  setText("unit-total", hasUnitData ? money.format(period.unitTotal) : "Sin dato");
+  setText("unit-total-large", hasUnitData ? money.format(period.unitTotal) : "Sin dato");
+  setText("unit-total-row", hasUnitData ? money.format(period.unitTotal) : "Sin dato");
+  setText("unit-common", hasUnitData ? money.format(period.common) : "No detectado");
+  setText("unit-particular", hasUnitData ? money.format(period.particular) : "No detectado");
+  setText("unit-due", hasUnitData ? period.due : "No detectada en el archivo");
+  setText("unit-due-date", hasUnitData ? period.dueShort : "—");
+  setText("unit-change", hasUnitData ? `${period.unitChange >= 0 ? "↑" : "↓"} ${percent.format(Math.abs(period.unitChange))}%` : "Sin comparación");
   setText("unit-period", period.shortName);
   setText("category-total", money.format(period.total));
-  renderChart(periodKey, period.history);
+  setText("chart-selected-period", `${period.name} es el período seleccionado`);
+  renderChart(periodKey, period);
   renderCategories(period.categories, period.total);
   renderIncreases(period.increases);
   const changePill = document.getElementById("building-change");
   const unitChange = document.getElementById("unit-change");
-  if (changePill) changePill.className = `change-pill ${up ? "up" : "down"}`;
+  if (changePill) changePill.className = `change-pill ${!hasComparison ? "neutral" : up ? "up" : "down"}`;
   if (unitChange) unitChange.className = `change-text ${period.unitChange >= 0 ? "up-text" : "down-text"}`;
+  setText("insight-note-copy", period.hasComparison
+    ? "Comparación calculada con los dos períodos que cargaste. Revisá los renglones extraídos antes de compartir."
+    : importedPeriods.has(periodKey)
+      ? "Para detectar aumentos, cargá también la liquidación del período anterior. Revisá el detalle extraído."
+      : "Las cifras de esta vista son ilustrativas. Cargá tus archivos para analizarlos.");
+}
+
+const monthShortNames = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"];
+
+function monthName(periodKey) {
+  const [year, month] = periodKey.split("-").map(Number);
+  return new Date(year, month - 1, 1).toLocaleDateString("es-AR", { month: "long", year: "numeric" });
+}
+
+function adjacentPeriod(periodKey) {
+  const [year, month] = periodKey.split("-").map(Number);
+  const date = new Date(year, month - 2, 1);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function compactKey(value) {
+  return String(value).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("es-AR").trim();
+}
+
+function buildImportedPeriods() {
+  importedPeriods.clear();
+  const sorted = [...importedStatements].sort((left, right) => left.periodKey.localeCompare(right.periodKey));
+  const totals = new Map(sorted.map((statement) => [statement.periodKey, statement.expenses.reduce((sum, row) => sum + row.amount, 0)]));
+  for (const statement of sorted) {
+    const previousKey = adjacentPeriod(statement.periodKey);
+    const previous = sorted.find((candidate) => candidate.periodKey === previousKey);
+    const total = totals.get(statement.periodKey) || 0;
+    const previousTotal = previous ? totals.get(previousKey) : null;
+    const categoriesByKey = new Map();
+    for (const row of statement.expenses) {
+      const key = compactKey(row.description);
+      const item = categoriesByKey.get(key) || { name: row.description, amount: 0 };
+      item.amount += row.amount;
+      categoriesByKey.set(key, item);
+    }
+    const previousCategories = new Map();
+    if (previous) {
+      for (const row of previous.expenses) {
+        const key = compactKey(row.description);
+        previousCategories.set(key, (previousCategories.get(key) || 0) + row.amount);
+      }
+    }
+    const categories = [...categoriesByKey.entries()]
+      .map(([key, item], index) => {
+        const prior = previousCategories.get(key) || 0;
+        const change = prior > 0 ? ((item.amount - prior) / prior) * 100 : 0;
+        return { ...item, change, kind: "Extraído del archivo", tone: Object.keys(categoryTones)[index % 6] };
+      })
+      .sort((left, right) => right.amount - left.amount);
+    const increases = previous
+      ? categories.map((category) => {
+        const prior = previousCategories.get(compactKey(category.name)) || 0;
+        const delta = category.amount - prior;
+        return { name: category.name, detail: "Variación del concepto", delta, percentage: prior > 0 ? (delta / prior) * 100 : 0 };
+      }).filter((item) => item.delta > 0).sort((left, right) => right.delta - left.delta).slice(0, 5)
+      : [];
+    const delta = previousTotal === null ? 0 : total - previousTotal;
+    const historyStatements = sorted.filter((item) => item.periodKey <= statement.periodKey).slice(-6);
+    importedPeriods.set(statement.periodKey, {
+      name: monthName(statement.periodKey),
+      shortName: `${monthShortNames[Number(statement.periodKey.slice(-2)) - 1]} ${statement.periodKey.slice(0, 4)}`,
+      total,
+      delta,
+      change: previousTotal > 0 ? (delta / previousTotal) * 100 : 0,
+      history: historyStatements.map((item) => totals.get(item.periodKey) || 0),
+      historyLabels: historyStatements.map((item) => monthShortNames[Number(item.periodKey.slice(-2)) - 1]),
+      historyKeys: historyStatements.map((item) => item.periodKey),
+      categories,
+      increases,
+      hasComparison: Boolean(previous),
+      unitTotal: null,
+      common: null,
+      particular: null,
+      due: "No detectada en el archivo",
+      dueShort: "—",
+      unitChange: 0,
+    });
+  }
 }
 
 let toastTimer;
@@ -296,6 +435,215 @@ function showToast(message) {
   toastTimer = window.setTimeout(() => { toast.hidden = true; }, 2800);
 }
 
+function defaultPeriod() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function guessPeriod(filename) {
+  const normalized = compactKey(filename);
+  const numeric = normalized.match(/\b(20\d{2})[-_. ](0[1-9]|1[0-2])\b/);
+  if (numeric) return `${numeric[1]}-${numeric[2]}`;
+  const monthIndex = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+    .findIndex((month) => normalized.includes(month));
+  const year = normalized.match(/\b(20\d{2})\b/);
+  if (monthIndex >= 0 && year) return `${year[1]}-${String(monthIndex + 1).padStart(2, "0")}`;
+  return defaultPeriod();
+}
+
+function renderImportPreview() {
+  if (!pendingImport) return;
+  const host = document.getElementById("import-preview");
+  if (!host) return;
+  host.replaceChildren();
+  const selectedRows = [...pendingImport.selectedIndices]
+    .map((index) => pendingImport.expenses[index])
+    .filter(Boolean);
+  const total = selectedRows.reduce((sum, row) => sum + row.amount, 0);
+  setText("review-summary", `${selectedRows.length} renglones seleccionados · ${money.format(total)} sumados`);
+  const visibleCount = Math.min(60, pendingImport.expenses.length);
+  for (let index = 0; index < visibleCount; index += 1) {
+    const expense = pendingImport.expenses[index];
+    const row = document.createElement("label");
+    row.className = "preview-row";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = pendingImport.selectedIndices.has(index);
+    checkbox.setAttribute("aria-label", `Incluir ${expense.description}`);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) pendingImport.selectedIndices.add(index);
+      else pendingImport.selectedIndices.delete(index);
+      renderImportPreview();
+    });
+    const description = document.createElement("span");
+    description.className = "preview-description";
+    description.textContent = expense.description;
+    const amount = document.createElement("strong");
+    amount.textContent = money.format(expense.amount);
+    row.append(checkbox, description, amount);
+    host.append(row);
+  }
+  if (pendingImport.expenses.length > visibleCount) {
+    const note = document.createElement("p");
+    note.className = "preview-limit-note";
+    note.textContent = `Se muestran los primeros ${visibleCount}; los ${pendingImport.expenses.length - visibleCount} restantes también están seleccionados.`;
+    host.append(note);
+  }
+}
+
+async function prepareFile(file) {
+  const status = document.getElementById("upload-status");
+  if (!file) return;
+  if (status) status.textContent = "Leyendo el archivo en este navegador…";
+  const chooseButton = document.getElementById("upload-dropzone");
+  if (chooseButton) chooseButton.disabled = true;
+  try {
+    const result = await readExpenseFile(file);
+    pendingImport = {
+      fileName: file.name,
+      kind: result.kind,
+      expenses: result.expenses,
+      selectedIndices: new Set(result.expenses.map((_, index) => index)),
+    };
+    setText("review-file-name", file.name);
+    setText("review-file-kind", result.kind);
+    const periodField = document.getElementById("import-period");
+    if (periodField) periodField.value = guessPeriod(file.name);
+    document.getElementById("upload-step").hidden = true;
+    document.getElementById("review-step").hidden = false;
+    document.getElementById("dialog-done").hidden = true;
+    setText("dialog-copy", "Revisá lo extraído y corregí qué renglones entran en el análisis.");
+    renderImportPreview();
+  } catch (error) {
+    if (status) status.textContent = error instanceof Error && error.name === "ImportError"
+      ? error.message
+      : "No pude leer ese archivo. Verificá que sea un PDF con texto o un Excel .xlsx válido.";
+    const fileInput = document.getElementById("statement-file");
+    if (fileInput) fileInput.value = "";
+  } finally {
+    if (chooseButton) chooseButton.disabled = false;
+  }
+}
+
+function resetImportDialog() {
+  pendingImport = null;
+  const fileInput = document.getElementById("statement-file");
+  if (fileInput) fileInput.value = "";
+  document.getElementById("upload-step").hidden = false;
+  document.getElementById("review-step").hidden = true;
+  document.getElementById("dialog-done").hidden = false;
+  setText("dialog-copy", "Los archivos se procesan en este navegador. No se envían a un servidor.");
+  setText("upload-status", "");
+}
+
+function updateNotifications(periodKey) {
+  const host = document.getElementById("notification-items");
+  const period = importedPeriods.get(periodKey);
+  if (!host || !period) return;
+  host.replaceChildren();
+  const notes = [{ title: "Liquidación analizada", detail: `${period.name} · ${money.format(period.total)}`, tone: "" }];
+  const biggestIncrease = period.increases[0];
+  if (biggestIncrease) {
+    notes.push({
+      title: `Aumentó ${biggestIncrease.name}`,
+      detail: `${signedMoney(biggestIncrease.delta)} frente al mes anterior`,
+      tone: "coral",
+    });
+  }
+  for (const note of notes) {
+    const item = document.createElement("div");
+    item.className = "popover-item";
+    const bullet = document.createElement("span");
+    bullet.className = `popover-bullet${note.tone ? ` ${note.tone}` : ""}`;
+    const copy = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = note.title;
+    const detail = document.createElement("small");
+    detail.textContent = note.detail;
+    copy.append(title, detail);
+    item.append(bullet, copy);
+    host.append(item);
+  }
+  setText("popover-demo", "Avisos de esta sesión. Todavía no se envían a otros vecinos.");
+}
+
+function confirmImport() {
+  if (!pendingImport) return;
+  const periodKey = document.getElementById("import-period")?.value || "";
+  if (!/^20\d{2}-(0[1-9]|1[0-2])$/.test(periodKey)) {
+    showToast("Elegí un período válido.");
+    return;
+  }
+  const expenses = [...pendingImport.selectedIndices]
+    .map((index) => pendingImport.expenses[index])
+    .filter(Boolean);
+  if (!expenses.length) {
+    showToast("Seleccioná al menos un renglón para analizar.");
+    return;
+  }
+  const existingIndex = importedStatements.findIndex((item) => item.periodKey === periodKey);
+  if (existingIndex >= 0 && !window.confirm(`Ya cargaste una liquidación de ${monthName(periodKey)}. ¿Querés reemplazarla?`)) return;
+  const statement = { periodKey, file: pendingImport.fileName, kind: pendingImport.kind, expenses };
+  if (existingIndex >= 0) importedStatements.splice(existingIndex, 1, statement);
+  else importedStatements.push(statement);
+  hasImportedData = true;
+  buildImportedPeriods();
+
+  const periodSelect = document.getElementById("period-select");
+  if (periodSelect) {
+    periodSelect.replaceChildren();
+    for (const imported of [...importedStatements].sort((left, right) => right.periodKey.localeCompare(left.periodKey))) {
+      const importedOption = document.createElement("option");
+      importedOption.value = imported.periodKey;
+      importedOption.textContent = monthName(imported.periodKey);
+      periodSelect.append(importedOption);
+    }
+    periodSelect.value = periodKey;
+  }
+  setText("demo-banner-label", "Importación local.");
+  setText("demo-banner-copy", "Los datos se pierden al cerrar o actualizar la página.");
+  setText("building-name", "Consorcio cargado");
+  setText("building-location", "Datos de esta sesión");
+  setText("breadcrumb-building", "Consorcio cargado");
+  setText("review-card-label", "PERÍODOS CARGADOS");
+  setText("review-card-count", String(importedStatements.length));
+  setText("review-card-status", "Revisar");
+  setText("review-card-copy", "Confirmá los importes extraídos antes de compartir el resumen.");
+  document.getElementById("dismiss-banner")?.setAttribute("aria-label", "Cerrar aviso");
+  renderPeriod(periodKey);
+  renderStatements();
+  updateNotifications(periodKey);
+  resetImportDialog();
+  document.getElementById("source-dialog")?.close();
+  showToast("Período analizado. Revisá los importes y la comparación.");
+}
+
+function summaryText() {
+  const periodKey = document.getElementById("period-select")?.value || "";
+  const period = importedPeriods.get(periodKey);
+  if (!period) return "Este panel muestra datos ilustrativos; todavía no cargaste una liquidación real.";
+  const previous = period.hasComparison
+    ? `Variación total frente al mes anterior: ${signedMoney(period.delta)} (${percent.format(Math.abs(period.change))}%).`
+    : "Todavía no hay un período anterior cargado para comparar.";
+  const top = period.increases.slice(0, 3).map((item) => `${item.name}: ${signedMoney(item.delta)} (${percent.format(item.percentage)}%)`).join("; ");
+  return `Resumen de ${period.name}. Gasto extraído: ${money.format(period.total)}. ${previous}${top ? ` Mayores aumentos: ${top}.` : ""} Datos revisados por el vecino antes de compartir.`;
+}
+
+async function shareSummary() {
+  const text = summaryText();
+  try {
+    if (navigator.share) await navigator.share({ title: "Resumen de expensas", text });
+    else if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      showToast("Resumen copiado. Ya podés compartirlo con los vecinos.");
+    } else {
+      showToast("Tu navegador no permite compartir desde esta página.");
+    }
+  } catch (error) {
+    if (error?.name !== "AbortError") showToast("No se pudo abrir la opción para compartir.");
+  }
+}
+
 function bindInteractions() {
   document.getElementById("period-select")?.addEventListener("change", (event) => {
     renderPeriod(event.currentTarget.value);
@@ -303,11 +651,38 @@ function bindInteractions() {
 
   const dialog = document.getElementById("source-dialog");
   document.getElementById("add-statement")?.addEventListener("click", () => dialog?.showModal());
+  dialog?.addEventListener("close", resetImportDialog);
   document.getElementById("dialog-close")?.addEventListener("click", () => dialog?.close());
   document.getElementById("dialog-done")?.addEventListener("click", () => dialog?.close());
   dialog?.addEventListener("click", (event) => {
     if (event.target === dialog) dialog.close();
   });
+
+  const fileInput = document.getElementById("statement-file");
+  const dropzone = document.getElementById("upload-dropzone");
+  dropzone?.addEventListener("click", () => fileInput?.click());
+  fileInput?.addEventListener("change", (event) => prepareFile(event.currentTarget.files?.[0]));
+  dropzone?.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    dropzone.classList.add("is-dragging");
+  });
+  dropzone?.addEventListener("dragleave", () => dropzone.classList.remove("is-dragging"));
+  dropzone?.addEventListener("drop", (event) => {
+    event.preventDefault();
+    dropzone.classList.remove("is-dragging");
+    prepareFile(event.dataTransfer?.files?.[0]);
+  });
+  document.getElementById("back-to-upload")?.addEventListener("click", () => {
+    document.getElementById("review-step").hidden = true;
+    document.getElementById("upload-step").hidden = false;
+    document.getElementById("dialog-done").hidden = false;
+    setText("dialog-copy", "Los archivos se procesan en este navegador. No se envían a un servidor.");
+    setText("upload-status", "");
+  });
+  document.getElementById("confirm-import")?.addEventListener("click", confirmImport);
+  document.getElementById("drive-option")?.addEventListener("click", () => showToast("Google Drive necesita una conexión OAuth y un backend; todavía no está conectado."));
+  document.getElementById("gmail-option")?.addEventListener("click", () => showToast("Gmail necesita una conexión OAuth y un backend; todavía no está conectado."));
+  document.getElementById("share-summary")?.addEventListener("click", shareSummary);
 
   const popover = document.getElementById("notification-popover");
   const notificationButton = document.getElementById("notification-button");
@@ -330,7 +705,7 @@ function bindInteractions() {
     showToast("El historial completo se habilita al conectar el backend.");
   });
   document.getElementById("trend-range")?.addEventListener("click", () => {
-    showToast("Mostrando los últimos 6 meses de datos de muestra.");
+    showToast(importedStatements.length ? "El gráfico muestra los períodos que cargaste en esta sesión." : "Cargá los períodos para comparar la evolución de tus gastos.");
   });
   document.querySelectorAll("[data-nav]").forEach((link) => {
     link.addEventListener("click", () => {

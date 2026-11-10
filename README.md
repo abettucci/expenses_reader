@@ -10,13 +10,15 @@ This repository started as a script that reads Google Sheets in Drive and append
 - `compare_statements` remains available for unit-to-unit-period comparisons.
 - Amounts use `Decimal` so comparisons do not rely on binary floating-point arithmetic.
 
-The package still does not ingest PDFs, Excel files, Drive, or Gmail, and it does not provide shared web access or notifications. The original `consorcio.py` remains the legacy importer. File examples are needed to implement and validate extraction against the actual consorcio format.
+The package still does not ingest files in Python or provide shared web access. The original `consorcio.py` remains the legacy importer. File examples are needed to validate extraction against the actual consorcio format.
 
-## Frontend demo
+## Frontend
 
-The `frontend/` directory contains a responsive, static dashboard with illustrative data. Its period selector, navigation, notification panel, and source dialog work locally, but uploads, Gmail, Drive, authentication, and live expense data are not connected. Do not replace the sample data with resident records until the backend access controls are in place.
+The `frontend/` directory contains a responsive dashboard. It can read text PDFs and `.xlsx` workbooks in the browser, show extracted rows for review, and compare consecutive periods. Files are not sent to a server; imported data is kept only in memory and is cleared when the page is refreshed or closed. The parser accepts files up to 15 MB, PDFs up to 80 pages, and workbooks up to 20,000 expense rows. Scanned PDFs need OCR and legacy `.xls` files must be saved as `.xlsx` first.
 
-To deploy it on Vercel, import this repository and set the project root directory to `frontend`. The Vercel configuration runs `npm ci` and `npm run build`, then serves `dist/`. The frontend has no third-party npm dependencies.
+Google Drive and Gmail are not connected yet because they need OAuth and a backend. “Compartir resumen” opens the device's share sheet when available; it does not send notifications automatically to other residents. The dashboard starts with illustrative sample data and switches to imported periods after a file is analyzed.
+
+The root `vercel.json` builds and publishes `frontend/dist`, so Vercel can use the repository root as its project directory. The parser bundles and matching PDF worker are committed to keep the Vercel build independent of a package registry. See `frontend/VENDOR-NOTICES.md` for included library licenses.
 
 ## Run the core checks
 
