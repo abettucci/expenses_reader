@@ -89,6 +89,100 @@ function groupPdfTextItems(items) {
     .map((line) => line.parts.sort((left, right) => left.x - right.x).map((part) => part.text).join(" "));
 }
 
+// Layout-aware reader for consorcio statements: detail amounts sit in one column
+// marked with "$". Descriptions are the text to the left of that column.
+function findAmountColumn(items) {
+  const counts = new Map();
+  for (const item of items) {
+    const x = Math.round(Number(item.transform?.[4] ?? 0));
+    if (typeof item.str === "string" && item.str.trim().startsWith("$") && x >= 300 && x <= 450) {
+      counts.set(x, (counts.get(x) ?? 0) + 1);
+    }
+  }
+  let best = null;
+  for (const [x, count] of counts) {
+    if (count >= 5 && (!best || count > best.count)) best = { x, count };
+  }
+  return best ? best.x : null;
+}
+
+function moneyText(row) {
+  return row.parts
+    .slice()
+    .sort((left, right) => left.x - right.x)
+    .map((part) => part.text)
+    .join("")
+    .replace(/\s+/g, "")
+    .replace(/\$/g, "");
+}
+
+function isMoneyRow(row, column) {
+  return row.parts.length > 0
+    && Math.min(...row.parts.map((part) => part.x)) <= column + 12
+    && /^-?\d[\d.]*(,\d{1,2})?$/.test(moneyText(row));
+}
+
+function parseAmountColumnPage(items, column) {
+  const amountRows = new Map();
+  const labels = [];
+  for (const item of items) {
+    const text = String(item.str ?? "").trim();
+    if (!text) continue;
+    const x = Number(item.transform?.[4] ?? 0);
+    const y = Math.round(Number(item.transform?.[5] ?? 0));
+    if (x >= column - 4 && x <= column + 70) {
+      const key = Math.round(y / 3) * 3;
+      if (!amountRows.has(key)) amountRows.set(key, { y: key, parts: [] });
+      amountRows.get(key).parts.push({ x, text });
+    } else if (x >= 45 && x < column - 4) {
+      labels.push({ x, y, text });
+    }
+  }
+  // A provider's first line sits just above its amount, and wrapped lines follow below it.
+  // Attach each label to the nearest amount line at or below it, or else to the nearest one.
+  const rows = [...amountRows.values()]
+    .map((row) => ({ ...row, labels: [] }))
+    .filter((row) => isMoneyRow(row, column));
+  for (const label of labels) {
+    let nearest = null;
+    for (const row of rows) {
+      const distance = Math.abs(row.y - label.y);
+      if (distance > 12) continue;
+      const rank = row.y <= label.y ? 0 : 1;
+      if (!nearest || rank < nearest.rank || (rank === nearest.rank && distance < nearest.distance)) {
+        nearest = { row, distance, rank };
+      }
+    }
+    if (nearest) nearest.row.labels.push(label);
+  }
+  const expenses = [];
+  for (const row of rows) {
+    row.parts.sort((left, right) => left.x - right.x);
+    // Detail amounts start at the "$" column; larger x means a header value, not an expense.
+    if (row.parts[0].x > column + 12) continue;
+    const amountText = row.parts
+      .map((part) => part.text)
+      .join("")
+      .replace(/\s+/g, "")
+      .replace(/\$/g, "");
+    if (!/^-?\d[\d.]*(,\d{1,2})?$/.test(amountText)) continue;
+    const description = row.labels
+      .sort((left, right) => right.y - left.y || left.x - right.x)
+      .map((part) => part.text)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .replace(/(\s\.){2,}\s*$/, "")
+      .trim();
+    if (!/\p{L}{2,}/u.test(description)) continue;
+    // Rows starting with a unit code ("0116 - 1 - 14 - NAME", "1-11 NAME") belong to the per-unit
+    // prorating and payment tables, not to building expenses.
+    if (/^(\d{4}\s*-|\d{1,2}-\d{1,2}\b)/.test(description)) continue;
+    const expense = createExpense(description.slice(0, 180), parseAmount(amountText));
+    if (expense) expenses.push(expense);
+  }
+  return expenses;
+}
+
 async function readPdf(buffer) {
   const document = await pdfjsLib.getDocument({
     data: new Uint8Array(buffer),
@@ -97,17 +191,29 @@ async function readPdf(buffer) {
   }).promise;
   try {
     if (document.numPages > MAX_PDF_PAGES) throw new ImportError(`El PDF supera el límite de ${MAX_PDF_PAGES} páginas.`);
-    const expenses = [];
+    const pages = [];
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
       const content = await page.getTextContent();
       if (content.items.length > MAX_PDF_TEXT_ITEMS) throw new ImportError("El PDF tiene demasiados fragmentos de texto para procesar.");
-      for (const line of groupPdfTextItems(content.items)) {
-        const expense = parseTrailingAmount(line);
-        if (expense) expenses.push(expense);
+      pages.push(content.items);
+      page.cleanup();
+    }
+    // Consorcio statements: pages with a "$" amount column hold the expense detail; other pages
+    // (per-unit prorating tables, notices) are skipped. Plain text PDFs fall back to line parsing.
+    const amountColumn = findAmountColumn(pages.flat());
+    const expenses = [];
+    for (const items of pages) {
+      let pageExpenses;
+      if (amountColumn !== null) {
+        pageExpenses = parseAmountColumnPage(items, amountColumn);
+      } else {
+        pageExpenses = groupPdfTextItems(items).map(parseTrailingAmount).filter(Boolean);
+      }
+      for (const expense of pageExpenses) {
+        expenses.push(expense);
         if (expenses.length > MAX_ROWS) throw new ImportError(`El PDF tiene más de ${MAX_ROWS} renglones para revisar.`);
       }
-      page.cleanup();
     }
     if (!expenses.length) {
       throw new ImportError("No encontré renglones de gastos con texto seleccionable. Si el PDF es un escaneo, hace falta OCR.");

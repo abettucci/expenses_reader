@@ -1,4 +1,4 @@
-// node_modules/fflate/esm/browser.js
+// ../../build/node_modules/fflate/esm/browser.js
 var u8 = Uint8Array;
 var u16 = Uint16Array;
 var i32 = Int32Array;
@@ -472,7 +472,7 @@ function unzipSync(data, opts) {
   return files;
 }
 
-// node_modules/pdfjs-dist/build/pdf.mjs
+// ../../build/node_modules/pdfjs-dist/build/pdf.mjs
 var __webpack_require__ = {};
 (() => {
   __webpack_require__.d = (exports, definition) => {
@@ -26349,6 +26349,69 @@ function groupPdfTextItems(items) {
   }
   return [...lineMap.values()].sort((left, right) => right.y - left.y).map((line) => line.parts.sort((left, right) => left.x - right.x).map((part) => part.text).join(" "));
 }
+function findAmountColumn(items) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const item of items) {
+    const x2 = Math.round(Number(item.transform?.[4] ?? 0));
+    if (typeof item.str === "string" && item.str.trim().startsWith("$") && x2 >= 300 && x2 <= 450) {
+      counts.set(x2, (counts.get(x2) ?? 0) + 1);
+    }
+  }
+  let best = null;
+  for (const [x2, count] of counts) {
+    if (count >= 5 && (!best || count > best.count)) best = { x: x2, count };
+  }
+  return best ? best.x : null;
+}
+function moneyText(row) {
+  return row.parts.slice().sort((left, right) => left.x - right.x).map((part) => part.text).join("").replace(/\s+/g, "").replace(/\$/g, "");
+}
+function isMoneyRow(row, column) {
+  return row.parts.length > 0 && Math.min(...row.parts.map((part) => part.x)) <= column + 12 && /^-?\d[\d.]*(,\d{1,2})?$/.test(moneyText(row));
+}
+function parseAmountColumnPage(items, column) {
+  const amountRows = /* @__PURE__ */ new Map();
+  const labels = [];
+  for (const item of items) {
+    const text = String(item.str ?? "").trim();
+    if (!text) continue;
+    const x2 = Number(item.transform?.[4] ?? 0);
+    const y = Math.round(Number(item.transform?.[5] ?? 0));
+    if (x2 >= column - 4 && x2 <= column + 70) {
+      const key = Math.round(y / 3) * 3;
+      if (!amountRows.has(key)) amountRows.set(key, { y: key, parts: [] });
+      amountRows.get(key).parts.push({ x: x2, text });
+    } else if (x2 >= 45 && x2 < column - 4) {
+      labels.push({ x: x2, y, text });
+    }
+  }
+  const rows = [...amountRows.values()].map((row) => ({ ...row, labels: [] })).filter((row) => isMoneyRow(row, column));
+  for (const label of labels) {
+    let nearest = null;
+    for (const row of rows) {
+      const distance = Math.abs(row.y - label.y);
+      if (distance > 12) continue;
+      const rank = row.y <= label.y ? 0 : 1;
+      if (!nearest || rank < nearest.rank || rank === nearest.rank && distance < nearest.distance) {
+        nearest = { row, distance, rank };
+      }
+    }
+    if (nearest) nearest.row.labels.push(label);
+  }
+  const expenses = [];
+  for (const row of rows) {
+    row.parts.sort((left, right) => left.x - right.x);
+    if (row.parts[0].x > column + 12) continue;
+    const amountText = row.parts.map((part) => part.text).join("").replace(/\s+/g, "").replace(/\$/g, "");
+    if (!/^-?\d[\d.]*(,\d{1,2})?$/.test(amountText)) continue;
+    const description = row.labels.sort((left, right) => right.y - left.y || left.x - right.x).map((part) => part.text).join(" ").replace(/\s+/g, " ").replace(/(\s\.){2,}\s*$/, "").trim();
+    if (!/\p{L}{2,}/u.test(description)) continue;
+    if (/^(\d{4}\s*-|\d{1,2}-\d{1,2}\b)/.test(description)) continue;
+    const expense = createExpense(description.slice(0, 180), parseAmount(amountText));
+    if (expense) expenses.push(expense);
+  }
+  return expenses;
+}
 async function readPdf(buffer) {
   const document2 = await getDocument({
     data: new Uint8Array(buffer),
@@ -26357,17 +26420,27 @@ async function readPdf(buffer) {
   }).promise;
   try {
     if (document2.numPages > MAX_PDF_PAGES) throw new ImportError(`El PDF supera el l\xEDmite de ${MAX_PDF_PAGES} p\xE1ginas.`);
-    const expenses = [];
+    const pages = [];
     for (let pageNumber = 1; pageNumber <= document2.numPages; pageNumber += 1) {
       const page = await document2.getPage(pageNumber);
       const content = await page.getTextContent();
       if (content.items.length > MAX_PDF_TEXT_ITEMS) throw new ImportError("El PDF tiene demasiados fragmentos de texto para procesar.");
-      for (const line of groupPdfTextItems(content.items)) {
-        const expense = parseTrailingAmount(line);
-        if (expense) expenses.push(expense);
+      pages.push(content.items);
+      page.cleanup();
+    }
+    const amountColumn = findAmountColumn(pages.flat());
+    const expenses = [];
+    for (const items of pages) {
+      let pageExpenses;
+      if (amountColumn !== null) {
+        pageExpenses = parseAmountColumnPage(items, amountColumn);
+      } else {
+        pageExpenses = groupPdfTextItems(items).map(parseTrailingAmount).filter(Boolean);
+      }
+      for (const expense of pageExpenses) {
+        expenses.push(expense);
         if (expenses.length > MAX_ROWS) throw new ImportError(`El PDF tiene m\xE1s de ${MAX_ROWS} renglones para revisar.`);
       }
-      page.cleanup();
     }
     if (!expenses.length) {
       throw new ImportError("No encontr\xE9 renglones de gastos con texto seleccionable. Si el PDF es un escaneo, hace falta OCR.");
@@ -26590,6 +26663,142 @@ async function readExpenseFile(file) {
   } catch (error) {
     if (error instanceof ImportError) throw error;
     throw new ImportError("No pude leer el Excel. Verific\xE1 que no est\xE9 da\xF1ado y que use el formato .xlsx.");
+  }
+}
+
+// drive.js
+var GOOGLE_CLIENT_ID = "364424801820-55db8m0j7aija70oce7th4i747hnuq4b.apps.googleusercontent.com";
+var DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
+var GIS_SRC = "https://accounts.google.com/gsi/client";
+var MAX_BYTES = 15 * 1024 * 1024;
+var SOURCE_MIME_TYPES = [
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+];
+var tokenClient = null;
+var accessToken = "";
+var tokenExpiresAt = 0;
+var pending = null;
+function loadGis() {
+  if (window.google?.accounts?.oauth2) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = GIS_SRC;
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("No se pudo cargar el servicio de Google."));
+    document.head.append(script);
+  });
+}
+function ensureTokenClient() {
+  if (tokenClient) return;
+  tokenClient = window.google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: DRIVE_SCOPE,
+    callback: (response) => {
+      if (!pending) return;
+      const { resolve, reject } = pending;
+      pending = null;
+      if (response.error) {
+        reject(new Error(response.error));
+        return;
+      }
+      accessToken = response.access_token;
+      tokenExpiresAt = Date.now() + (Number(response.expires_in) || 3600) * 1e3 - 6e4;
+      resolve(accessToken);
+    },
+    error_callback: (error) => {
+      if (!pending) return;
+      const { reject } = pending;
+      pending = null;
+      reject(new Error(error?.type || "popup_failed"));
+    }
+  });
+}
+function getToken() {
+  if (accessToken && Date.now() < tokenExpiresAt) return Promise.resolve(accessToken);
+  return new Promise((resolve, reject) => {
+    pending = { resolve, reject };
+    tokenClient.requestAccessToken({ prompt: accessToken ? "" : "consent" });
+  });
+}
+async function driveGet(url, token) {
+  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!response.ok) throw new Error(`Google Drive respondi\xF3 ${response.status}.`);
+  return response;
+}
+async function listStatementFiles(token) {
+  const mimeQuery = SOURCE_MIME_TYPES.map((type) => `mimeType='${type}'`).join(" or ");
+  const params = new URLSearchParams({
+    q: `(${mimeQuery}) and trashed=false`,
+    orderBy: "modifiedTime desc",
+    pageSize: "25",
+    fields: "files(id,name,mimeType,size)"
+  });
+  const data = await (await driveGet(`https://www.googleapis.com/drive/v3/files?${params}`, token)).json();
+  return data.files || [];
+}
+async function downloadStatementFile(file, token) {
+  if (Number(file.size) > MAX_BYTES) throw new Error("Ese archivo supera 15 MB.");
+  const response = await driveGet(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?alt=media`,
+    token
+  );
+  const blob = await response.blob();
+  return new File([blob], file.name, { type: file.mimeType });
+}
+function renderFileList(files, token, { onFile, notify }) {
+  const container = document.getElementById("drive-files");
+  if (!container) return;
+  container.replaceChildren();
+  container.hidden = false;
+  if (!files.length) {
+    const empty = document.createElement("p");
+    empty.className = "upload-help";
+    empty.textContent = "No encontr\xE9 PDF ni Excel .xlsx en tu Google Drive.";
+    container.append(empty);
+    return;
+  }
+  for (const file of files) {
+    const button = document.createElement("button");
+    button.className = "source-option integration-option";
+    button.type = "button";
+    const label = document.createElement("span");
+    const name = document.createElement("strong");
+    name.textContent = file.name;
+    label.append(name);
+    button.append(label);
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        const downloaded = await downloadStatementFile(file, token);
+        container.hidden = true;
+        await onFile(downloaded);
+      } catch (error) {
+        notify(error.message || "No se pudo descargar el archivo de Drive.");
+        button.disabled = false;
+      }
+    });
+    container.append(button);
+  }
+}
+async function openDriveFiles({ onFile, notify }) {
+  if (!GOOGLE_CLIENT_ID) {
+    notify("Google Drive todav\xEDa no est\xE1 configurado: falta el Client ID.");
+    return;
+  }
+  try {
+    await loadGis();
+    ensureTokenClient();
+    const token = await getToken();
+    const files = await listStatementFiles(token);
+    const status = document.querySelector("#drive-option .source-soon");
+    if (status) status.textContent = "Conectado";
+    renderFileList(files, token, { onFile, notify });
+  } catch (error) {
+    notify(
+      error.message === "popup_closed" || error.message === "popup_failed" ? "Se cerr\xF3 la ventana de Google antes de conectar." : "No pude conectar con Google Drive. Prob\xE1 de nuevo."
+    );
   }
 }
 
@@ -27216,7 +27425,7 @@ function bindInteractions() {
     setText("upload-status", "");
   });
   document.getElementById("confirm-import")?.addEventListener("click", confirmImport);
-  document.getElementById("drive-option")?.addEventListener("click", () => showToast("Google Drive necesita una conexi\xF3n OAuth y un backend; todav\xEDa no est\xE1 conectado."));
+  document.getElementById("drive-option")?.addEventListener("click", () => openDriveFiles({ onFile: prepareFile, notify: showToast }));
   document.getElementById("gmail-option")?.addEventListener("click", () => showToast("Gmail necesita una conexi\xF3n OAuth y un backend; todav\xEDa no est\xE1 conectado."));
   document.getElementById("share-summary")?.addEventListener("click", shareSummary);
   const popover = document.getElementById("notification-popover");

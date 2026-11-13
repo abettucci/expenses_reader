@@ -1,4 +1,5 @@
 import { readExpenseFile } from "./importer.js";
+import { openDriveFiles } from "./drive.js";
 
 const periods = {
   "2026-10": {
@@ -680,7 +681,7 @@ function bindInteractions() {
     setText("upload-status", "");
   });
   document.getElementById("confirm-import")?.addEventListener("click", confirmImport);
-  document.getElementById("drive-option")?.addEventListener("click", () => showToast("Google Drive necesita una conexión OAuth y un backend; todavía no está conectado."));
+  document.getElementById("drive-option")?.addEventListener("click", () => openDriveFiles({ onFile: prepareFile, notify: showToast }));
   document.getElementById("gmail-option")?.addEventListener("click", () => showToast("Gmail necesita una conexión OAuth y un backend; todavía no está conectado."));
   document.getElementById("share-summary")?.addEventListener("click", shareSummary);
 
